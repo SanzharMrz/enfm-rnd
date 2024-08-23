@@ -47,30 +47,6 @@ class Multiply(nn.Module):
         return torch.mul(x, self.alpha)
 
 
-class Multiply(nn.Module):
-    """
-    A PyTorch module to multiply input tensor by a scalar alpha.
-    
-    Args:
-        alpha (float): The scalar value to multiply the input tensor by.
-    """
-    def __init__(self, alpha: float):
-        super().__init__()
-        self.alpha = alpha
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass to multiply input tensor by alpha.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Scaled tensor.
-        """
-        return torch.mul(x, self.alpha)
-
-
 class EvolutionaryStacking:
     """
     A class that performs evolutionary stacking using either CMA-ES or Optuna for optimization.
