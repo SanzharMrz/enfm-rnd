@@ -25,7 +25,7 @@ seed_everything()
 
 class Multiply(nn.Module):
     """
-    A PyTorch module to multiply input tensor by a scalar alpha.
+    Simple module to multiply input tensor by a scalar alpha.
     
     Args:
         alpha (float): The scalar value to multiply the input tensor by.
