@@ -120,29 +120,23 @@ class EvolutionaryStacking:
         Returns:
             torch.Tensor: The computed loss.
         """
-        # Pass through the embedding layer
         emb = merged_model["embed"](input_ids)
     
-        # Generate rotary embeddings
         position_ids = torch.arange(input_ids.size(1), dtype=torch.long, device=input_ids.device)
         position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
         rot = merged_model["rotary"](emb, position_ids)
     
-        # Pass through the layers
         out = emb
         for idx, layer in enumerate(merged_model["layers"]):
             if idx % 2 == 0:
-                # Ensure the input is a tensor and not a tuple
                 if isinstance(out, tuple):
-                    out = out[0]  # Extract the tensor if it's a tuple
-                out = layer(out)  # Multiply layer
+                    out = out[0]
+                out = layer(out)
             else:
                 out = layer(hidden_states=out, position_embeddings=rot)  # Transformer block
     
-        # Pass through the final linear layer to get logits
         logits = merged_model["lm_head"](out)
     
-        # Compute the loss
         loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
         loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
     
