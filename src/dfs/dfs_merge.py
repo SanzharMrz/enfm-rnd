@@ -9,6 +9,8 @@ import random
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, GenerationConfig
 
+from binary_evolution import BinaryEvolution
+
 DEFAULT_RANDOM_SEED = 666
 
 def seed_everything(seed=DEFAULT_RANDOM_SEED):
@@ -53,6 +55,7 @@ class EvolutionaryStacking:
 
     Args:
         models_list (list): List of models to be stacked.
+        tokenizer (transformers.PreTrainedTokenizer): Pre-trained tokenizer.
         r (int): Number of repetitions.
         M (int): Number of layers in each model.
         n (int): Number of models.
@@ -63,7 +66,8 @@ class EvolutionaryStacking:
     
     def __init__(
         self, 
-        models_list: list, 
+        models_list: list,
+        tokenizer,
         r: int, 
         M: int, 
         n: int, 
@@ -72,17 +76,22 @@ class EvolutionaryStacking:
         num_generations: int = 100
     ):
         self.models_list = models_list
+        self.tokenizer = tokenizer
         self.r = r
         self.M = M
         self.n = n
-        self.W_dim = M * r * n
+        self.I_dim = M * r * n
+        self.W_dim = M * r * n + 1
         self.method = method
         self.population_size = population_size
         self.num_generations = num_generations
         
         if method == "cma":
-            self.cma_es_I = CMAEvolutionStrategy([1] + [0] * (self.W_dim - 2) + [1], 0.1)
-            self.cma_es_W = CMAEvolutionStrategy([0.5] * (self.W_dim * (self.W_dim + 1) // 2), 0.2)
+            self.cma_es_I = CMAEvolutionStrategy([1] + [0] * (self.I_dim - 2) + [1], 0.1)
+            self.cma_es_W = CMAEvolutionStrategy([0.5] * (self.W_dim * (self.W_dim - 1) // 2), 0.2)
+        elif method == "mixed":
+            self.I_optimizer = BinaryEvolution(self.I_dim, self.population_size)
+            self.cma_es_W = CMAEvolutionStrategy([0.5] * (self.W_dim * (self.W_dim - 1) // 2), 0.2)
 
     def forward_merged_model(self, merged_model: dict, input_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -118,13 +127,12 @@ class EvolutionaryStacking:
     
         return loss
     
-    def calculate_perplexity(self, model, tokenizer, data: list[str]) -> float:
+    def calculate_perplexity(self, model, data: list[str]) -> float:
         """
         Calculates the perplexity of the model given a list of instructions and perfect responses.
     
         Args:
             model: The pre-trained causal language model.
-            tokenizer: The tokenizer corresponding to the model.
             instructions (list[str]): List of input instructions.
             responses (list[str]): List of corresponding perfect responses.
     
@@ -136,10 +144,10 @@ class EvolutionaryStacking:
     
         for instruction, response in data:
             input_text = instruction + response
-            inputs = tokenizer(input_text, return_tensors="pt")
+            inputs = self.tokenizer(input_text, return_tensors="pt")
     
             labels = inputs.input_ids.clone()
-            labels[:, :len(tokenizer(instruction).input_ids)] = -100
+            labels[:, :len(self.tokenizer(instruction).input_ids)] = -100
     
             with torch.no_grad():
                 loss = self.forward_merged_model(model, inputs.input_ids, labels)
@@ -232,7 +240,7 @@ class EvolutionaryStacking:
         """
         W_matrix = self.W_to_matrix(W, self.W_dim)
         model = self.construct_merged_model(I, W_matrix)
-        return self.calculate_perplexity(model, tokenizer, data)
+        return self.calculate_perplexity(model, data)
 
     def optuna_objective(self, trial: optuna.trial.Trial, train_data) -> float:
         """
@@ -290,13 +298,39 @@ class EvolutionaryStacking:
         study.optimize(lambda trial: self.optuna_objective(trial, train_data), n_trials=n_trials)
 
         best_trial = study.best_trial
-        best_I = [best_trial.params[f"I_{i}"] for i in range(self.W_dim)]
-        best_W = [best_trial.params[f"W_{i}"] for i in range(self.W_dim)]
+        best_I = [best_trial.params[f"I_{i}"] for i in range(self.I_dim)]
+        best_W = [best_trial.params[f"W_{i}"] for i in range((self.W_dim * (self.W_dim - 1)) // 2)]
 
         val_perplexity = self.evaluate_model(best_I, best_W, val_data)
         print(f"Best validation perplexity: {val_perplexity}")
         
         return best_I, best_W, val_perplexity
+
+    def run_mixed_optimization(self, train_data, val_data):
+        """
+        Runs the optimization using the mixed method with custom evolution for I and CMA-ES for W.
+
+        Args:
+            train_data: Training data.
+            val_data: Validation data.
+
+        Returns:
+            tuple: Best I, best W, and best validation perplexity.
+        """
+        best_models = []
+
+        for n in range(self.num_generations):
+            I_list = self.I_optimizer.get_new_population()
+            W_list = self.cma_es_W.ask(number=self.population_size)
+            metrics = [self.evaluate_model(I_list[i], W_list[i], train_data) for i in range(len(I_list))]
+            self.I_optimizer.update_population(I_list, metrics)
+            self.cma_es_W.tell(W_list, metrics)
+            val_metrics = [self.evaluate_model(I_list[i], W_list[i], val_data) for i in range(len(I_list))]
+            best_idx = np.argmin(val_metrics)
+            best_models.append((I_list[best_idx], W_list[best_idx], metrics[best_idx]))
+            print(f"Generation {n}, best val perplexity: {val_metrics[best_idx]}")
+        
+        return best_models
 
     def run(self, train_data, val_data, n_trials: int = 100):
         """
@@ -314,8 +348,10 @@ class EvolutionaryStacking:
             return self.run_cma_evolution(train_data, val_data)
         elif self.method == "optuna":
             return self.run_optuna_optimization(train_data, val_data, n_trials)
+        elif self.method == "mixed":
+            return self.run_mixed_optimization(train_data, val_data)
         else:
-            raise ValueError("Invalid method. Choose either 'cma' or 'optuna'.")
+            raise ValueError("Invalid method. Choose 'cma', 'mixed', or 'optuna'.")
 
 
 if __name__ == "__main__":
@@ -347,7 +383,7 @@ if __name__ == "__main__":
     r = 1
     n = 2
     n_trials = 100
-    method = "optuna"
+    method = "mixed"
     
-    evolutionary_stacking = EvolutionaryStacking(models_list, r, M, n, method=method)
+    evolutionary_stacking = EvolutionaryStacking(models_list, tokenizer, r, M, n, method=method)
     best_models = evolutionary_stacking.run(train, val, n_trials)
