@@ -7,9 +7,12 @@ from cma.evolution_strategy import CMAEvolutionStrategy
 import os 
 import random
 from datasets import load_dataset
+from pprint import pprint
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, GenerationConfig
+import logging
+from tqdm import tqdm
+import time
 
-from binary_evolution import BinaryEvolution
 
 DEFAULT_RANDOM_SEED = 666
 
@@ -22,48 +25,25 @@ def seed_everything(seed=DEFAULT_RANDOM_SEED):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+logging.basicConfig(
+    filename='evolutionary_stacking.log', 
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 seed_everything()
 
 
 class Multiply(nn.Module):
-    """
-    Simple module to multiply input tensor by a scalar alpha.
-    
-    Args:
-        alpha (float): The scalar value to multiply the input tensor by.
-    """
     def __init__(self, alpha: float):
         super().__init__()
         self.alpha = alpha
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass to multiply input tensor by alpha.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Scaled tensor.
-        """
         return torch.mul(x, self.alpha)
 
 
 class EvolutionaryStacking:
-    """
-    A class that performs evolutionary stacking using either CMA-ES or Optuna for optimization.
-
-    Args:
-        models_list (list): List of models to be stacked.
-        tokenizer (transformers.PreTrainedTokenizer): Pre-trained tokenizer.
-        r (int): Number of repetitions.
-        M (int): Number of layers in each model.
-        n (int): Number of models.
-        method (str): Optimization method, either "optuna" or "cma". Default is "optuna".
-        population_size (int): Population size for CMA-ES. Default is 50.
-        num_generations (int): Number of generations for CMA-ES. Default is 100.
-    """
-    
     def __init__(
         self, 
         models_list: list,
@@ -94,23 +74,10 @@ class EvolutionaryStacking:
             self.cma_es_W = CMAEvolutionStrategy([0.5] * (self.W_dim * (self.W_dim - 1) // 2), 0.2)
 
     def forward_merged_model(self, merged_model: dict, input_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the merged model to compute logits and loss.
-    
-        Args:
-            merged_model (dict): A dictionary containing the model components.
-            input_ids (torch.Tensor): Input tensor with token IDs.
-            labels (torch.Tensor): Target tensor with token IDs.
-    
-        Returns:
-            torch.Tensor: The computed loss.
-        """
         emb = merged_model["embed"](input_ids)
-    
         position_ids = torch.arange(input_ids.size(1), dtype=torch.long, device=input_ids.device)
         position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
         rot = merged_model["rotary"](emb, position_ids)
-    
         out = emb
         for idx, layer in enumerate(merged_model["layers"]):
             if idx % 2 == 0:
@@ -118,45 +85,33 @@ class EvolutionaryStacking:
                     out = out[0]
                 out = layer(out)
             else:
-                out = layer(hidden_states=out, position_embeddings=rot)  # Transformer block
-    
+                out = layer(hidden_states=out, position_embeddings=rot)
         logits = merged_model["lm_head"](out)
-    
         loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
         loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
-    
         return loss
-    
+
     def calculate_perplexity(self, model, data: list[str]) -> float:
-        """
-        Calculates the perplexity of the model given a list of instructions and perfect responses.
-    
-        Args:
-            model: The pre-trained causal language model.
-            instructions (list[str]): List of input instructions.
-            responses (list[str]): List of corresponding perfect responses.
-    
-        Returns:
-            float: The average perplexity across all instructions and responses.
-        """
         total_loss = 0.0
         total_tokens = 0
-    
-        for instruction, response in data:
+        logger.info('Start inferencing instructions')
+        data_size = len(data)
+        for i, (instruction, response) in tqdm(enumerate(data), total=data_size, ncols=80):
             input_text = instruction + response
             inputs = self.tokenizer(input_text, return_tensors="pt")
-    
             labels = inputs.input_ids.clone()
             labels[:, :len(self.tokenizer(instruction).input_ids)] = -100
-    
             with torch.no_grad():
-                loss = self.forward_merged_model(model, inputs.input_ids, labels)
+                loss = self.forward_merged_model(model, inputs.input_ids.to(device), labels.to(device))
                 total_loss += loss.item() * (labels != -100).sum().item()
                 total_tokens += (labels != -100).sum().item()
-    
+
+            if i % 10 == 0:
+                logger.info(f"Progress: {i}/{data_size} items processed")
+
         average_loss = total_loss / total_tokens
         perplexity = torch.exp(torch.tensor(average_loss)).item()
-    
+        logger.info(f"Calculated perplexity: {perplexity}")
         return perplexity
 
     def W_to_matrix(self, W: np.ndarray, dim: int) -> np.ndarray:
@@ -184,7 +139,6 @@ class EvolutionaryStacking:
                 W_matrix[i][j] = W[cnt]
                 cnt += 1
         return W_matrix
-
 
     def get_ith_layer(self, model, i: int):
         """
@@ -225,112 +179,44 @@ class EvolutionaryStacking:
         model["rotary"] = list(self.models_list[0].model.children())[3]
         model["lm_head"] = self.models_list[0].lm_head
         return model
-
+    
     def evaluate_model(self, I: list[int], W: np.ndarray, data) -> float:
-        """
-        Evaluates the model based on the given binary vector and weight matrix.
-
-        Args:
-            I (list[int]): Binary list indicating the presence of layers.
-            W (np.ndarray): Weight matrix.
-            data: Data to evaluate the model on.
-
-        Returns:
-            float: The calculated perplexity of the model.
-        """
         W_matrix = self.W_to_matrix(W, self.W_dim)
         model = self.construct_merged_model(I, W_matrix)
-        return self.calculate_perplexity(model, data)
-
-    def optuna_objective(self, trial: optuna.trial.Trial, train_data) -> float:
-        """
-        Objective function for Optuna optimization.
-    
-        Args:
-            trial (optuna.trial.Trial): A single trial of the Optuna study.
-            train_data: Data to train the model on.
-    
-        Returns:
-            float: The evaluation metric (perplexity) of the model.
-        """
-        I_list = [trial.suggest_int(f"I_{i}", 0, 1) for i in range(self.W_dim)]
-        W_dim_upper_triangle = (self.W_dim * (self.W_dim - 1)) // 2
-        W_list = [trial.suggest_float(f"W_{i}", 0.0, 1.0) for i in range(W_dim_upper_triangle)]
-        return self.evaluate_model(I_list, W_list, train_data)
-
-    def run_cma_evolution(self, train_data, val_data):
-        """
-        Runs the evolution using the CMA-ES method.
-
-        Args:
-            train_data: Training data.
-            val_data: Validation data.
-
-        Returns:
-            list: Best models found during the evolution.
-        """
-        best_models = []
-        for n in range(self.num_generations):
-            I_list = self.cma_es_I.ask(number=self.population_size)
-            W_list = self.cma_es_W.ask(number=self.population_size)
-            metrics = [self.evaluate_model(I_list[i], W_list[i], train_data) for i in range(len(I_list))]
-            self.cma_es_I.tell(I_list, metrics)
-            self.cma_es_W.tell(W_list, metrics)
-            val_metrics = [self.evaluate_model(I_list[i], W_list[i], val_data) for i in range(len(I_list))]
-            best_idx = np.argmin(val_metrics)
-            best_models.append((I_list[best_idx], W_list[best_idx], metrics[best_idx]))
-            print(f"Generation {n}, best val perplexity: {val_metrics[best_idx]}")
-        return best_models
-
-    def run_optuna_optimization(self, train_data, val_data, n_trials: int):
-        """
-        Runs the optimization using the Optuna method.
-
-        Args:
-            train_data: Training data.
-            val_data: Validation data.
-            n_trials (int): Number of trials for the Optuna study.
-
-        Returns:
-            tuple: Best I, best W, and best validation perplexity.
-        """
-        study = optuna.create_study(direction="minimize")
-        study.optimize(lambda trial: self.optuna_objective(trial, train_data), n_trials=n_trials)
-
-        best_trial = study.best_trial
-        best_I = [best_trial.params[f"I_{i}"] for i in range(self.I_dim)]
-        best_W = [best_trial.params[f"W_{i}"] for i in range((self.W_dim * (self.W_dim - 1)) // 2)]
-
-        val_perplexity = self.evaluate_model(best_I, best_W, val_data)
-        print(f"Best validation perplexity: {val_perplexity}")
-        
-        return best_I, best_W, val_perplexity
+        perplexity = self.calculate_perplexity(model, data)
+        logger.info(f"Evaluation perplexity: {perplexity}")
+        return perplexity
 
     def run_mixed_optimization(self, train_data, val_data):
-        """
-        Runs the optimization using the mixed method with custom evolution for I and CMA-ES for W.
-
-        Args:
-            train_data: Training data.
-            val_data: Validation data.
-
-        Returns:
-            tuple: Best I, best W, and best validation perplexity.
-        """
         best_models = []
-
-        for n in range(self.num_generations):
+        for n in tqdm(range(self.num_generations), total=self.num_generations, ncols=80):
+            start_time = time.time()
+            
             I_list = self.I_optimizer.get_new_population()
             W_list = self.cma_es_W.ask(number=self.population_size)
-            metrics = [self.evaluate_model(I_list[i], W_list[i], train_data) for i in range(len(I_list))]
+
+            for i in tqdm(range(len(I_list)), total=len(I_list), ncols=80):
+                metrics = self.evaluate_model(I_list[i], W_list[i], train_data)
+                
+                if i % 10 == 0:
+                    logger.info(f"Evaluating population: {i}/{len(I_list)}")
+
+            logger.info(f"Generation {n} complete, metrics: {metrics}")
+
             self.I_optimizer.update_population(I_list, metrics)
             self.cma_es_W.tell(W_list, metrics)
+            
             val_metrics = [self.evaluate_model(I_list[i], W_list[i], val_data) for i in range(len(I_list))]
             best_idx = np.argmin(val_metrics)
             best_models.append((I_list[best_idx], W_list[best_idx], metrics[best_idx]))
-            print(f"Generation {n}, best val perplexity: {val_metrics[best_idx]}")
+            
+            logger.info(f"Generation {n}, best val perplexity: {val_metrics[best_idx]}")
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"Generation {n} took {elapsed_time:.2f} seconds")
         
         return best_models
+
 
     def run(self, train_data, val_data, n_trials: int = 100):
         """
