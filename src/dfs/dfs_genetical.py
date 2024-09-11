@@ -34,7 +34,7 @@ def seed_everything(seed: int = DEFAULT_RANDOM_SEED) -> None:
 seed_everything()
 
 wandb.login(key=os.environ['WANDB_KEY'])
-wandb.init(project="layer_optimization_stacking", name='Genetic: Llama-3-8B-16k-RAG-Chat and T-lite-instruct-0.1')
+wandb.init(project="layer_optimization_stacking", name='Genetic for gemma2b-instruct')
 
 table = wandb.Table(columns=["Layers", "Perplexity"])
 
@@ -50,7 +50,7 @@ class LayerStackingOptimization:
         """
         self.device_name = f'cuda:{cuda_idx}'
         self.device = torch.device(self.device_name)
-        self.tokenizer = AutoTokenizer.from_pretrained("Vikhrmodels/Llama-3-8B-16k-RAG-Chat")
+        self.tokenizer = AutoTokenizer.from_pretrained("Vikhrmodels/Vikhr-Gemma-2B-instruct")
 
         logging.basicConfig(
             filename='log_iterations.txt',
@@ -61,16 +61,16 @@ class LayerStackingOptimization:
         logging.info('Initialized LayerStackingOptimization class.')
 
         self.model1 = AutoModelForCausalLM.from_pretrained(
-            "Vikhrmodels/Llama-3-8B-16k-RAG-Chat",
+            "Vikhrmodels/Vikhr-Gemma-2B-instruct",
             token=os.environ['HF_TOKEN'],
             device_map="cpu"
         )
         self.model2 = AutoModelForCausalLM.from_pretrained(
-            'AnatoliiPotapov/T-lite-instruct-0.1',
+            "Vikhrmodels/Vikhr-Gemma-2B-instruct",
             token=os.environ['HF_TOKEN'],
             device_map="cpu"
         )
-        self.new_config = AutoConfig.from_pretrained("Vikhrmodels/Llama-3-8B-16k-RAG-Chat")
+        self.new_config = AutoConfig.from_pretrained("Vikhrmodels/Vikhr-Gemma-2B-instruct")
         self.new_config.num_hidden_layers = NEW_MODEL_SIZE
 
         self.num_layers_m1 = self.model1.config.num_hidden_layers
