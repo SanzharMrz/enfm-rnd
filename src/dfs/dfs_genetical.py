@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 
 DEFAULT_RANDOM_SEED = 666
-NEW_MODEL_SIZE = 50
+NEW_MODEL_SIZE = 45
 
 def seed_everything(seed: int = DEFAULT_RANDOM_SEED) -> None:
     """Set random seed for all libraries for reproducibility.
@@ -70,7 +70,7 @@ class LayerStackingOptimization:
             token=os.environ['HF_TOKEN'],
             device_map="cpu"
         )
-        self.new_config = AutoConfig.from_pretrained("Vikhrmodels/Vikhr-Gemma-2B-instruct")
+        self.new_config = AutoConfig.from_pretrained("Vikhrmodels/Llama-3-8B-16k-RAG-Chat")
         self.new_config.num_hidden_layers = NEW_MODEL_SIZE
 
         self.num_layers_m1 = self.model1.config.num_hidden_layers
