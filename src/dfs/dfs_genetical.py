@@ -82,6 +82,7 @@ class LayerStackingOptimization:
         train, val, test = dataset_shuffled.iloc[:1000], dataset_shuffled.iloc[1000:1300], dataset_shuffled.iloc[1300:2300]
         extract_content = lambda df: df.conversation.apply(lambda x: [x[0]['content'], x[1]['content']])
         train, val, test = map(extract_content, [train, val, test])
+        train = train.sample(400, random_state=DEFAULT_RANDOM_SEED)
         self.train_texts = train.map(lambda row: row[0] + " " + row[1]).tolist()
 
     def create_new_model(self, layer_indices: List[Tuple[int, int]]) -> AutoModelForCausalLM:
